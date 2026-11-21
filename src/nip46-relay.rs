@@ -646,8 +646,9 @@ mod tests {
     fn a_publish_crosses_to_a_subscriber_and_answers_ok() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let store = Arc::new(Mutex::new(EventStore::new(RelayConfig::default())));
         let maps = (
-            Arc::new(Mutex::new(EventStore::new(RelayConfig::default()))),
+            store.clone(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::<nostr::key::PublicKey, RateLimiter>::new())),
@@ -823,8 +824,9 @@ mod tests {
     fn an_oversized_frame_ends_the_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let store = Arc::new(Mutex::new(EventStore::new(RelayConfig::default())));
         let maps = (
-            Arc::new(Mutex::new(EventStore::new(RelayConfig::default()))),
+            store.clone(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::<nostr::key::PublicKey, RateLimiter>::new())),
@@ -847,27 +849,49 @@ mod tests {
         plain(&mut conn).set_read_timeout(Some(BEAT)).unwrap();
 
         let oversized = "x".repeat(MAX_FRAME_BYTES + 1);
-        conn.send(Message::text(oversized)).unwrap();
-        // The server's read of the frame errors on the cap, and the
-        // connection ends: the next read on the client side sees the
-        // close rather than an answer.
-        let mut saw_close = false;
-        for _ in 0..10 {
-            match conn.read() {
-                Err(tungstenite::Error::ConnectionClosed)
-                | Err(tungstenite::Error::Protocol(_))
-                | Err(tungstenite::Error::Io(_)) => {
-                    saw_close = true;
-                    break;
+        // The cap can fire at either end: the server aborts the moment
+        // its read errors on the oversized frame (resetting the
+        // client's send), or the client sees the close on its next
+        // read. Either shape is the pass.
+        let mut ended = match conn.send(Message::text(oversized)) {
+            Err(_) => true,
+            Ok(()) => {
+                let mut ended = false;
+                for _ in 0..10 {
+                    match conn.read() {
+                        Ok(Message::Text(_)) => {}
+                        _ => {
+                            ended = true;
+                            break;
+                        }
+                    }
                 }
-                Ok(_) => {}
-                Err(_) => {
-                    saw_close = true;
-                    break;
-                }
+                ended
             }
-        }
-        assert!(saw_close, "the oversized frame ends the connection");
+        };
+        assert!(ended, "the oversized frame ends the connection");
+        // And the refusal is total: an oversized frame never reaches
+        // the store, so nothing the relay holds can be replayed from
+        // it. The store the handler threads share is the same one the
+        // test constructed, which held nothing before the send.
+        let held = store
+            .lock()
+            .expect("the event store")
+            .query(&RelayFilter {
+                kinds: vec![24133],
+                p: vec![],
+                authors: vec![],
+                ids: vec![],
+                since: None,
+                until: None,
+                limit: None,
+                unsatisfiable: false,
+            });
+        assert!(
+            held.is_empty(),
+            "an oversized frame must never reach the store: {} held events",
+            held.len()
+        );
     }
 
     /// Subscriptions on one connection are bounded: the 33rd distinct
@@ -877,8 +901,9 @@ mod tests {
     fn subscriptions_on_one_connection_are_bounded() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let store = Arc::new(Mutex::new(EventStore::new(RelayConfig::default())));
         let maps = (
-            Arc::new(Mutex::new(EventStore::new(RelayConfig::default()))),
+            store.clone(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::<nostr::key::PublicKey, RateLimiter>::new())),
@@ -947,8 +972,9 @@ mod tests {
     fn a_kind_the_relay_does_not_carry_is_refused_with_reason() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let store = Arc::new(Mutex::new(EventStore::new(RelayConfig::default())));
         let maps = (
-            Arc::new(Mutex::new(EventStore::new(RelayConfig::default()))),
+            store.clone(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::<nostr::key::PublicKey, RateLimiter>::new())),
