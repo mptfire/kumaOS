@@ -864,7 +864,7 @@ mod tests {
         .finalize(&Keys::generate())
         .unwrap();
         let oversized = serde_json::json!(["EVENT", oversized_event]).to_string();
-        let mut ended = match conn.send(Message::text(oversized)) {
+        let ended = match conn.send(Message::text(oversized)) {
             Err(_) => true,
             Ok(()) => 'outer: {
                 for _ in 0..30 {
