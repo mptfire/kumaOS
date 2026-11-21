@@ -853,20 +853,16 @@ mod tests {
         // its read errors on the oversized frame (resetting the
         // client's send), or the client sees the close on its next
         // read. Either shape is the pass.
-        let mut ended = match conn.send(Message::text(oversized)) {
+        let ended = match conn.send(Message::text(oversized)) {
             Err(_) => true,
-            Ok(()) => {
-                let mut ended = false;
+            Ok(()) => 'outer: {
                 for _ in 0..10 {
                     match conn.read() {
                         Ok(Message::Text(_)) => {}
-                        _ => {
-                            ended = true;
-                            break;
-                        }
+                        _ => break 'outer true,
                     }
                 }
-                ended
+                false
             }
         };
         assert!(ended, "the oversized frame ends the connection");
