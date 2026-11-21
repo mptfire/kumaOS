@@ -833,9 +833,9 @@ mod tests {
         );
         let listener = Arc::new(listener);
         let maps = maps.clone();
-        std::thread::spawn(move || {
+        let handler = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            let _ = one_connection(
+            one_connection(
                 1,
                 stream,
                 maps.0,
@@ -843,22 +843,36 @@ mod tests {
                 maps.2,
                 maps.3,
                 kuma::relay::RATE_LIMIT_PER_MINUTE,
-            );
+            )
         });
         let (mut conn, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
         plain(&mut conn).set_read_timeout(Some(BEAT)).unwrap();
 
-        let oversized = "x".repeat(MAX_FRAME_BYTES + 1);
-        // The cap can fire at either end: the server aborts the moment
-        // its read errors on the oversized frame (resetting the
-        // client's send), or the client sees the close on its next
-        // read. Either shape is the pass.
-        let ended = match conn.send(Message::text(oversized)) {
+        // The payload is a signed EVENT-shaped frame — the wire shape a
+        // real client sends — sized one byte past the cap. The cap can
+        // fire at either end: the server aborts the moment its read
+        // errors on the oversized frame (resetting the client's send),
+        // or the client sees the close on its next read. WouldBlock and
+        // TimedOut from the one-second beat keep the read WAITING; they
+        // are not the close, so they continue the sweep rather than
+        // count.
+        let oversized_event = EventBuilder::new(
+            Kind::from_u16(24133),
+            "x".repeat(MAX_FRAME_BYTES + 1),
+        )
+        .tag(Tag::public_key(Keys::generate().public_key()))
+        .finalize(&Keys::generate())
+        .unwrap();
+        let oversized = serde_json::json!(["EVENT", oversized_event]).to_string();
+        let mut ended = match conn.send(Message::text(oversized)) {
             Err(_) => true,
             Ok(()) => 'outer: {
-                for _ in 0..10 {
+                for _ in 0..30 {
                     match conn.read() {
                         Ok(Message::Text(_)) => {}
+                        Err(tungstenite::Error::Io(ref e))
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut => {}
                         _ => break 'outer true,
                     }
                 }
@@ -866,6 +880,14 @@ mod tests {
             }
         };
         assert!(ended, "the oversized frame ends the connection");
+        // Joining the handler closes the loop from the server side: it
+        // must have ENDED on the oversized read (the cap), not survived
+        // it — a handler that swallowed the frame would leave the store
+        // assertion below passing with a connection still open.
+        let handler_result = handler
+            .join()
+            .expect("the handler thread panicked");
+        assert!(handler_result.is_err(), "one_connection must end on the oversized read");
         // And the refusal is total: an oversized frame never reaches
         // the store, so nothing the relay holds can be replayed from
         // it. The store the handler threads share is the same one the
