@@ -45,7 +45,11 @@ jobs:
             | sed 's/^[[:space:]]*Scope:[[:space:]]*//' | tr ',' '\n' \
             | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's:/*$::' \
             | sed '/^$/d' > scopes.txt || true
-          git diff --name-only "$BASE...$HEAD" > changed.txt
+          # --no-renames: a pure rename (out-of-scope path → in-scope path)
+          # would otherwise show as one R entry and slip the check; with
+          # renames disabled the moved file appears at BOTH paths, and
+          # the out-of-scope half is caught.
+          git diff --no-renames --name-only "$BASE...$HEAD" > changed.txt
 
           if [ ! -s scopes.txt ]; then
             echo "note: no Scope: line in the PR body; the convention is new and nothing is enforced yet" >&2
